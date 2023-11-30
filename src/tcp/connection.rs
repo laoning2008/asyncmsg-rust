@@ -17,6 +17,7 @@ use std::time::Duration;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::time::{Instant, interval, timeout};
 use anyhow::{Error, Result};
+use chrono::Local;
 use tokio::runtime::{Handle};
 use tokio::select;
 use tokio::task::JoinHandle;
@@ -86,6 +87,7 @@ impl Connection {
 
     pub async fn send_packet(&self, packet: &Packet) -> Result<()> {
         let data = packet.to_bytes();
+        println!("{}, send req2, cmd = {}, seq = {}, rsp = {}", Local::now(), packet.cmd(), packet.seq(), packet.rsp());
         Ok(self.stream_writer.lock().await.write_all(data.as_bytes()).await?)
     }
 
@@ -95,6 +97,8 @@ impl Connection {
         if result.is_err() {
             println!("{}", result.err().unwrap());
         }
+
+        println!("{}, send req, cmd = {}, seq = {}, rsp = {}", Local::now(), packet.cmd(), packet.seq(), packet.rsp());
 
         let (sender, receiver) = oneshot::channel();
         let packet_id = Self::get_packet_id(packet.cmd(), packet.seq());
@@ -156,7 +160,7 @@ impl Connection {
                 let mut should_stop = false;
 
                 for pack in received_packets {
-                    println!("recv pack, cmd = {}, seq = {}, device_id = {}, rsp = {}", pack.cmd(), pack.seq(), pack.device_id(), pack.rsp());
+                    println!("{}, recv pack, cmd = {}, seq = {}, device_id = {}, rsp = {}", Local::now(), pack.cmd(), pack.seq(), pack.device_id(), pack.rsp());
                     let pack_device_id = pack.device_id().to_string();
                     if pack_device_id.is_empty() {
                         println!("device_id is empty, discard it");
@@ -168,12 +172,12 @@ impl Connection {
                     if pack.rsp() {
                         let packet_id = Self::get_packet_id(pack.cmd(), pack.seq());
                         let mut rsp_chan_sender = rsp_chan_sender.lock().await;
-                        if !(*rsp_chan_sender).contains_key(&packet_id) {
+                        if !rsp_chan_sender.contains_key(&packet_id) {
                             println!("receive out of date rsp");
                             continue;
                         }
 
-                        let rsp_chan_sender_for_packet = (*rsp_chan_sender).remove(&packet_id).unwrap();
+                        let rsp_chan_sender_for_packet = rsp_chan_sender.remove(&packet_id).unwrap();
                         if rsp_chan_sender_for_packet.send(pack).is_err() {
                             println!("send response to channel failed");
                         }
@@ -215,14 +219,13 @@ impl Connection {
                 }
 
                 let size = read_result.unwrap();
-                println!("recv size = {}", size);
+                // println!("recv size = {}", size);
                 if size == 0 {
                     println!("socket closed");
                     break;
                 }
             }
 
-            println!("send connection closed event");
             let _ = connection_event_sender.send(Closed(connection_id, device_id.lock().await.to_string())).await;
         }
     }

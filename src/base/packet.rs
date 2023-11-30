@@ -66,14 +66,11 @@ pub struct Packet {
 impl Packet {
     pub fn new_req(cmd: u32, device_id: &str, body: Bytes) -> Packet {
         let seq = SEQUENCE.fetch_add(1, Ordering::SeqCst) as u32;
-        let rsp = false;
-        let ec : u32 = 0;
-        Packet { cmd, seq, rsp, ec, device_id: device_id.to_string(), body}
+        Packet { cmd, seq, rsp: false, ec: 0, device_id: device_id.to_string(), body}
     }
 
     pub fn new_rsp(cmd: u32, seq: u32, ec: u32, device_id: &str, body: Bytes) -> Packet {
-        let rsp = true;
-        Packet { cmd, seq, rsp, ec, device_id: device_id.to_string(), body}
+        Packet { cmd, seq, rsp: true, ec, device_id: device_id.to_string(), body}
     }
 
     pub fn from_bytes(buf: &mut Cursor<&[u8]>) -> Option<Packet> {

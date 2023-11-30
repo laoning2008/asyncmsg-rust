@@ -59,7 +59,7 @@ async fn main() {
             select! {
                 _ = sigterm.recv() => println!("Recieve SIGTERM"),
                 _ = sigint.recv() => println!("Recieve SIGTERM"),
-            };
+            }
             stop_tx.send(()).unwrap();
         }
     });

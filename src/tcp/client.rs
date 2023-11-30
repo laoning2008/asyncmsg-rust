@@ -199,7 +199,7 @@ impl Client {
                     println!("set connection none finished");
                 }
 
-                let mut interval = interval(Duration::from_millis(200));
+                let mut interval = interval(Duration::from_millis(500));
                 interval.tick().await;
             }
         }

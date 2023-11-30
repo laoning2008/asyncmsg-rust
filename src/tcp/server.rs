@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 use anyhow::{Result, Error};
+use chrono::Local;
 use tokio::net::{TcpListener};
 use tokio::runtime::Handle;
 use tokio::select;
@@ -61,12 +62,14 @@ impl Server {
     }
 
     pub async fn send_packet(&self, mut packet: Packet) -> Result<()> {
+        println!("{}, send rsp begin1, cmd = {}, seq = {}", Local::now(), packet.cmd(), packet.seq());
+
         let device_id_2_conn = self.device_id_2_conn.lock().await;
-        let c = device_id_2_conn.contains_key(packet.device_id());
 
         if !device_id_2_conn.contains_key(packet.device_id()) {
             return Err(Error::msg("invalid device id"));
         }
+        println!("{}, send rsp begin2, cmd = {}, seq = {}", Local::now(), packet.cmd(), packet.seq());
         device_id_2_conn.get(packet.device_id()).unwrap().send_packet(&packet).await
     }
 
@@ -75,7 +78,6 @@ impl Server {
 
         for _ in 0.. max_tries {
             let device_id_2_conn = self.device_id_2_conn.lock().await;
-            let c = device_id_2_conn.contains_key(packet.device_id());
             if device_id_2_conn.contains_key(packet.device_id()) {
                 let send_result = device_id_2_conn.get(packet.device_id()).unwrap().send_packet_and_wait_response(&packet, timeout_seconds).await;
                 if send_result.is_ok() {
@@ -159,7 +161,7 @@ impl Server {
                                       , request_chan_sender: Arc<Mutex<HashMap<u32, mpsc::Sender<Packet>>>>
                                       , mut conn_event_receiver: mpsc::Receiver<ConnectionEvent>) -> Result<()> {
         while let Some(event) = conn_event_receiver.recv().await {
-            println!("connection event");
+            // println!("connection event");
             match event {
                 ConnectionEvent::Closed(conn_id, device_id) => {
                     println!("recv closed event, conn_id = {}, device_id = {}", conn_id, device_id);
@@ -175,11 +177,11 @@ impl Server {
                     }
                 }
                 ConnectionEvent::GotRequest(conn_id, packet) => {
-                    println!("GotRequest event, conn_id = {}, device_id = {}", conn_id, packet.device_id());
+                    // println!("GotRequest event, conn_id = {}, device_id = {}", conn_id, packet.device_id());
 
                     if let Some(chan) = request_chan_sender.lock().await.get(&packet.cmd()) {
                         let _ = chan.send(packet).await;
-                        println!("send request to channel");
+                        // println!("send request to channel");
                     }
                 }
             }
