@@ -1,4 +1,3 @@
-use std::ffi::CString;
 use bytes::{Buf, Bytes};
 use std::io::{Cursor};
 use bytebuffer::{ByteBuffer, Endian};

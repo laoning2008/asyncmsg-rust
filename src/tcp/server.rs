@@ -8,17 +8,17 @@ use chrono::Local;
 use tokio::net::{TcpListener};
 use tokio::runtime::Handle;
 use tokio::select;
-use tokio::sync::{mpsc, Mutex, oneshot};
+use tokio::sync::{mpsc, oneshot, RwLock};
 use tokio::task::JoinHandle;
 use tokio::time::interval;
 use crate::base::Packet;
 use crate::tcp::connection::{Connection, ConnectionEvent};
 
 pub struct Server {
-    id_conn: Arc<Mutex<HashMap<u32, Connection>>>,
-    device_id_2_conn: Arc<Mutex<HashMap<String, Connection>>>,
-    request_chan_sender: Arc<Mutex<HashMap<u32, mpsc::Sender<Packet>>>>,
-    request_chan_receiver: Arc<Mutex<HashMap<u32, mpsc::Receiver<Packet>>>>,
+    id_conn: Arc<RwLock<HashMap<u32, Connection>>>,
+    device_id_2_conn: Arc<RwLock<HashMap<String, Connection>>>,
+    request_chan_sender: Arc<RwLock<HashMap<u32, mpsc::Sender<Packet>>>>,
+    request_chan_receiver: Arc<RwLock<HashMap<u32, mpsc::Receiver<Packet>>>>,
     stop_sender: Option<oneshot::Sender<()>>,
     task_handle: Option<JoinHandle<()>>,
 }
@@ -30,12 +30,12 @@ impl Drop for Server {
         swap(&mut stop_sender, &mut self.stop_sender);
         swap(&mut task_handle, &mut self.task_handle);
 
+        if let Some(stop_sender) = stop_sender {
+            let _ = stop_sender.send(());
+        }
+
         let _ = thread::spawn(|| {
             async move {
-                if let Some(stop_sender) = stop_sender {
-                    let _ = stop_sender.send(());
-                }
-
                 if let Some(task_handle) = task_handle {
                     let _ = task_handle.await;
                 }
@@ -49,10 +49,10 @@ impl Server {
         let (stop_sender, stop_receiver) = oneshot::channel();
 
         let mut server = Server {
-            id_conn: Arc::new(Mutex::new(HashMap::new())),
-            device_id_2_conn: Arc::new(Mutex::new(HashMap::new())),
-            request_chan_sender: Arc::new(Mutex::new(HashMap::new())),
-            request_chan_receiver: Arc::new(Mutex::new(HashMap::new())),
+            id_conn: Arc::new(RwLock::new(HashMap::new())),
+            device_id_2_conn: Arc::new(RwLock::new(HashMap::new())),
+            request_chan_sender: Arc::new(RwLock::new(HashMap::new())),
+            request_chan_receiver: Arc::new(RwLock::new(HashMap::new())),
             stop_sender: Some(stop_sender),
             task_handle: None,
         };
@@ -64,41 +64,53 @@ impl Server {
     pub async fn send_packet(&self, mut packet: Packet) -> Result<()> {
         println!("{}, send rsp begin1, cmd = {}, seq = {}", Local::now(), packet.cmd(), packet.seq());
 
-        let device_id_2_conn = self.device_id_2_conn.lock().await;
+        let device_id_2_conn = self.device_id_2_conn.read().await;
 
-        if !device_id_2_conn.contains_key(packet.device_id()) {
-            return Err(Error::msg("invalid device id"));
+        if device_id_2_conn.contains_key(packet.device_id()) {
+            println!("{}, send rsp begin2, cmd = {}, seq = {}", Local::now(), packet.cmd(), packet.seq());
+            let result = device_id_2_conn.get(packet.device_id()).unwrap().send_packet(&packet).await;
+            result
+        } else {
+            Err(Error::msg("disconnected"))
         }
-        println!("{}, send rsp begin2, cmd = {}, seq = {}", Local::now(), packet.cmd(), packet.seq());
-        device_id_2_conn.get(packet.device_id()).unwrap().send_packet(&packet).await
     }
 
     pub async fn send_packet_and_wait_response(&self, mut packet: Packet, timeout_seconds: u64, max_tries: u32) -> Result<Packet> {
         let mut interval = interval(Duration::from_millis(200));
 
+        println!("{}, send_packet_and_wait_response begin", Local::now());
+
         for _ in 0.. max_tries {
-            let device_id_2_conn = self.device_id_2_conn.lock().await;
-            if device_id_2_conn.contains_key(packet.device_id()) {
-                let send_result = device_id_2_conn.get(packet.device_id()).unwrap().send_packet_and_wait_response(&packet, timeout_seconds).await;
-                if send_result.is_ok() {
-                    return send_result;
+            {
+                let device_id_2_conn = self.device_id_2_conn.read().await;
+
+                if device_id_2_conn.contains_key(packet.device_id()) {
+                    let send_result = device_id_2_conn.get(packet.device_id()).unwrap().send_packet_and_wait_response(&packet, timeout_seconds).await;
+                    if send_result.is_ok() {
+                        println!("{}, send_packet_and_wait_response end", Local::now());
+                        return send_result;
+                    }
                 }
-            } else {
-                interval.tick().await;
             }
+
+            interval.tick().await;
         }
+
+        println!("{}, send_packet_and_wait_response end", Local::now());
 
         Err(Error::msg("send_packet_and_wait_response failed"))
     }
 
     pub async fn async_wait_request(&self, cmd: u32) -> Result<Packet> {
+        println!("{}, async_wait_request begin", Local::now());
+
         let mut req_receiver : Option<mpsc::Receiver<Packet>> = None;
         {
-            let mut chan_receiver = self.request_chan_receiver.lock().await;
+            let mut chan_receiver = self.request_chan_receiver.write().await;
             if !chan_receiver.contains_key(&cmd) {
                 let (sender, receiver) = mpsc::channel(128);
                 req_receiver = Some(receiver);
-                self.request_chan_sender.lock().await.insert(cmd, sender);
+                self.request_chan_sender.write().await.insert(cmd, sender);
             } else {
                 req_receiver = chan_receiver.remove(&cmd);
             }
@@ -109,9 +121,10 @@ impl Server {
         {
             let mut receiver : Option<mpsc::Receiver<Packet>> = None;
             swap(&mut receiver, &mut req_receiver);
-            self.request_chan_receiver.lock().await.insert(cmd, receiver.unwrap());
+            self.request_chan_receiver.write().await.insert(cmd, receiver.unwrap());
         }
 
+        println!("{}, async_wait_request end", Local::now());
         return result;
     }
 
@@ -142,7 +155,7 @@ impl Server {
         swap(&mut task_handle, &mut self.task_handle);
     }
 
-    async fn accept(id_conn: Arc<Mutex<HashMap<u32, Connection>>>, server_port: u16, conn_event_sender: mpsc::Sender<ConnectionEvent>) -> Result<()> {
+    async fn accept(id_conn: Arc<RwLock<HashMap<u32, Connection>>>, server_port: u16, conn_event_sender: mpsc::Sender<ConnectionEvent>) -> Result<()> {
         let listener = TcpListener::bind(format!("{}:{}", "localhost", server_port)).await?;
 
         let sender = conn_event_sender.clone();
@@ -152,34 +165,34 @@ impl Server {
             let device_id_empty = String::default();
             let conn = Connection::new( socket, &device_id_empty, conn_event_sender.clone());
             println!("new connection id = {}", conn.get_connection_id());
-            id_conn.lock().await.insert(conn.get_connection_id(), conn);
+            id_conn.write().await.insert(conn.get_connection_id(), conn);
         }
     }
 
-    async fn observe_connection_event(id_conn: Arc<Mutex<HashMap<u32, Connection>>>
-                                      , device_id_2_conn: Arc<Mutex<HashMap<String, Connection>>>
-                                      , request_chan_sender: Arc<Mutex<HashMap<u32, mpsc::Sender<Packet>>>>
+    async fn observe_connection_event(id_conn: Arc<RwLock<HashMap<u32, Connection>>>
+                                      , device_id_2_conn: Arc<RwLock<HashMap<String, Connection>>>
+                                      , request_chan_sender: Arc<RwLock<HashMap<u32, mpsc::Sender<Packet>>>>
                                       , mut conn_event_receiver: mpsc::Receiver<ConnectionEvent>) -> Result<()> {
         while let Some(event) = conn_event_receiver.recv().await {
             // println!("connection event");
             match event {
                 ConnectionEvent::Closed(conn_id, device_id) => {
                     println!("recv closed event, conn_id = {}, device_id = {}", conn_id, device_id);
-                    id_conn.lock().await.remove(&conn_id);
-                    device_id_2_conn.lock().await.remove(&device_id);
+                    id_conn.write().await.remove(&conn_id);
+                    device_id_2_conn.write().await.remove(&device_id);
                 }
                 ConnectionEvent::GotDeviceId(conn_id, device_id) => {
                     println!("recv GotDeviceId event, conn_id = {}, device_id = {}", conn_id, device_id);
 
-                    let conn = id_conn.lock().await.remove(&conn_id);
+                    let conn = id_conn.write().await.remove(&conn_id);
                     if let Some(conn) = conn {
-                        device_id_2_conn.lock().await.insert(device_id, conn);
+                        device_id_2_conn.write().await.insert(device_id, conn);
                     }
                 }
                 ConnectionEvent::GotRequest(conn_id, packet) => {
                     // println!("GotRequest event, conn_id = {}, device_id = {}", conn_id, packet.device_id());
 
-                    if let Some(chan) = request_chan_sender.lock().await.get(&packet.cmd()) {
+                    if let Some(chan) = request_chan_sender.read().await.get(&packet.cmd()) {
                         let _ = chan.send(packet).await;
                         // println!("send request to channel");
                     }

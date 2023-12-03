@@ -18,7 +18,7 @@ async fn send_request(client: Arc<Client>) {
         // println!("send req");
         let rsp_result = client.send_packet_and_wait_response(pack, 3, 3).await;
         if rsp_result.is_err() {
-            // println!("failed to receive rsp");
+            println!("failed to receive rsp");
         } else {
             let rsp = rsp_result.unwrap();
             println!("receive rsp from server, cmd = {}, seq = {}, device_id = {}, body = {}", rsp.cmd(), rsp.seq(), rsp.device_id(), String::from_utf8_lossy(rsp.body()));

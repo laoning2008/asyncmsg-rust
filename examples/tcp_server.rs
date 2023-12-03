@@ -1,10 +1,8 @@
 use std::sync::Arc;
 use std::time::Duration;
 use bytes::Bytes;
-use tokio::runtime::{Handle, Runtime};
 use asyncmsg::base::Packet;
-use asyncmsg::tcp::{Client, Server};
-use anyhow::Result;
+use asyncmsg::tcp::{Server};
 use tokio::select;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::watch;
@@ -14,10 +12,9 @@ async fn send_request(server: Arc<Server>) {
     loop {
         let body = Bytes::from("hello from server");
         let pack = Packet::new_req(2, "device_id_test", body);
-        // println!("send req");
         let rsp_result = server.send_packet_and_wait_response(pack, 3, 3).await;
         if rsp_result.is_err() {
-            // println!("failed to receive rsp");
+            println!("failed to receive rsp");
         } else {
             let rsp = rsp_result.unwrap();
             println!("receive rsp from client, cmd = {}, seq = {}, device_id = {}, body = {}", rsp.cmd(), rsp.seq(), rsp.device_id(), String::from_utf8_lossy(rsp.body()));

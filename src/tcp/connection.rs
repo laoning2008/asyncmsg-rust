@@ -1,9 +1,9 @@
 use std::io::Cursor;
-use std::sync::Arc;
+use std::sync::{Arc};
 use bytes::{Buf, BytesMut};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
-use tokio::sync::{Mutex, oneshot};
+use tokio::sync::{oneshot, RwLock};
 use tokio::sync::mpsc;
 use std::collections::HashMap;
 use std::future::Future;
@@ -19,7 +19,7 @@ use tokio::time::{Instant, interval, timeout};
 use anyhow::{Error, Result};
 use chrono::Local;
 use tokio::runtime::{Handle};
-use tokio::select;
+use tokio::{select};
 use tokio::task::JoinHandle;
 
 const RECV_BUF_SIZE: usize = 128*1024;
@@ -37,9 +37,9 @@ pub enum ConnectionEvent {
 
 pub struct Connection {
     connection_id: u32,
-    stream_writer: Mutex<OwnedWriteHalf>,
-    device_id: Arc<Mutex<String>>,
-    rsp_chan_sender: Arc<Mutex<HashMap<u64, oneshot::Sender<Packet>>>>,
+    stream_writer: RwLock<OwnedWriteHalf>,
+    device_id: Arc<RwLock<String>>,
+    rsp_chan_sender: Arc<RwLock<HashMap<u64, oneshot::Sender<Packet>>>>,
     stop_sender: Option<oneshot::Sender<()>>,
     task_handle: Option<JoinHandle<()>>,
 }
@@ -51,12 +51,12 @@ impl Drop for Connection {
         swap(&mut stop_sender, &mut self.stop_sender);
         swap(&mut task_handle, &mut self.task_handle);
 
+        if let Some(stop_sender) = stop_sender {
+            let _ = stop_sender.send(());
+        }
+
         let _ = thread::spawn(|| {
             async move {
-                if let Some(stop_sender) = stop_sender {
-                    let _ = stop_sender.send(());
-                }
-
                 if let Some(task_handle) = task_handle {
                     let _ = task_handle.await;
                 }
@@ -66,17 +66,15 @@ impl Drop for Connection {
 }
 
 impl Connection {
-    pub fn new(stream: TcpStream
-               , device_id: &str
-               , connection_event_sender: mpsc::Sender<ConnectionEvent>) -> Self {
+    pub fn new(stream: TcpStream, device_id: &str, connection_event_sender: mpsc::Sender<ConnectionEvent>) -> Self {
         let (stream_reader, stream_writer) = stream.into_split();
         let (stop_sender, stop_receiver) = oneshot::channel();
 
         let mut conn = Connection {
             connection_id: CONNECTION_ID.fetch_add(1, Ordering::SeqCst),
-            stream_writer: Mutex::new(stream_writer),
-            device_id : Arc::new(Mutex::new(device_id.to_string())),
-            rsp_chan_sender: Arc::new(Mutex::new(HashMap::new())),
+            stream_writer: RwLock::new(stream_writer),
+            device_id : Arc::new(RwLock::new(device_id.to_string())),
+            rsp_chan_sender: Arc::new(RwLock::new(HashMap::new())),
             stop_sender: Some(stop_sender),
             task_handle: None,
         };
@@ -88,30 +86,30 @@ impl Connection {
     pub async fn send_packet(&self, packet: &Packet) -> Result<()> {
         let data = packet.to_bytes();
         println!("{}, send req2, cmd = {}, seq = {}, rsp = {}", Local::now(), packet.cmd(), packet.seq(), packet.rsp());
-        Ok(self.stream_writer.lock().await.write_all(data.as_bytes()).await?)
+        Ok(self.stream_writer.write().await.write_all(data.as_bytes()).await?)
     }
 
     pub async fn send_packet_and_wait_response(&self, packet: &Packet, timeout_seconds: u64) -> Result<Packet> {
         let data = packet.to_bytes();
-        let result = self.stream_writer.lock().await.write_all(data.as_bytes()).await;
-        if result.is_err() {
-            println!("{}", result.err().unwrap());
-        }
+        self.stream_writer.write().await.write_all(data.as_bytes()).await?;
 
         println!("{}, send req, cmd = {}, seq = {}, rsp = {}", Local::now(), packet.cmd(), packet.seq(), packet.rsp());
 
         let (sender, receiver) = oneshot::channel();
         let packet_id = Self::get_packet_id(packet.cmd(), packet.seq());
-        self.rsp_chan_sender.lock().await.insert(packet_id, sender);
+        self.rsp_chan_sender.write().await.insert(packet_id, sender);
 
+        println!("{}, send req, timeout begin", Local::now());
         let rsp_packet_result = timeout(Duration::from_secs(timeout_seconds), receiver).await;
+        println!("{}, send req, timeout end", Local::now());
+
+        self.rsp_chan_sender.write().await.remove(&packet_id);
+
         if rsp_packet_result.is_err() {
-            self.rsp_chan_sender.lock().await.remove(&packet_id);
             return Err(Error::from(rsp_packet_result.err().unwrap()));
         }
 
         let rsp_packet_result= rsp_packet_result.unwrap();
-        self.rsp_chan_sender.lock().await.remove(&packet_id);
         Ok(rsp_packet_result?)
     }
 
@@ -125,7 +123,7 @@ impl Connection {
         let device_id = self.device_id.clone();
         let device_id_clone = self.device_id.clone();
         let rsp_chan_sender = self.rsp_chan_sender.clone();
-        let last_recv_time = Arc::new(Mutex::new(Instant::now()));
+        let last_recv_time = Arc::new(RwLock::new(Instant::now()));
         let last_recv_time_clone = last_recv_time.clone();
 
         let task_handle = Handle::current().spawn(
@@ -148,10 +146,10 @@ impl Connection {
         swap(&mut task_handle, &mut self.task_handle);
     }
 
-    fn receive_packet(connection_id: u32, device_id: Arc<Mutex<String>>
-                      , rsp_chan_sender: Arc<Mutex<HashMap<u64, oneshot::Sender<Packet>>>>
+    fn receive_packet(connection_id: u32, device_id: Arc<RwLock<String>>
+                      , rsp_chan_sender: Arc<RwLock<HashMap<u64, oneshot::Sender<Packet>>>>
                       , mut stream_reader: OwnedReadHalf
-                      , last_recv_time: Arc<Mutex<Instant>>
+                      , last_recv_time: Arc<RwLock<Instant>>
                       , connection_event_sender: mpsc::Sender<ConnectionEvent>) -> impl Future<Output = ()> {
         async move {
             let mut read_buffer =  BytesMut::with_capacity(RECV_BUF_SIZE);
@@ -167,11 +165,11 @@ impl Connection {
                         continue;
                     }
 
-                    *last_recv_time.lock().await = Instant::now();
+                    *last_recv_time.write().await = Instant::now();
 
                     if pack.rsp() {
                         let packet_id = Self::get_packet_id(pack.cmd(), pack.seq());
-                        let mut rsp_chan_sender = rsp_chan_sender.lock().await;
+                        let mut rsp_chan_sender = rsp_chan_sender.write().await;
                         if !rsp_chan_sender.contains_key(&packet_id) {
                             println!("receive out of date rsp");
                             continue;
@@ -182,7 +180,7 @@ impl Connection {
                             println!("send response to channel failed");
                         }
                     } else {
-                        let mut device_id = device_id.lock().await;
+                        let mut device_id = device_id.write().await;
 
                         if device_id.is_empty() {
                             *device_id = pack_device_id;
@@ -197,7 +195,6 @@ impl Connection {
                             break;
                         }
 
-                        // println!("GotRequest event sent");
                         if connection_event_sender.send(GotRequest(connection_id, pack)).await.is_err() {
                             println!("send request to channel failed");
                             should_stop = true;
@@ -226,11 +223,11 @@ impl Connection {
                 }
             }
 
-            let _ = connection_event_sender.send(Closed(connection_id, device_id.lock().await.to_string())).await;
+            let _ = connection_event_sender.send(Closed(connection_id, device_id.read().await.to_string())).await;
         }
     }
 
-    fn check(connection_id: u32, device_id: Arc<Mutex<String>>, last_recv_time: Arc<Mutex<Instant>>
+    fn check(connection_id: u32, device_id: Arc<RwLock<String>>, last_recv_time: Arc<RwLock<Instant>>
              , connection_event_sender: mpsc::Sender<ConnectionEvent>) -> impl Future<Output = ()> {
         async move {
             let mut interval = interval(Duration::from_secs(ACTIVE_CONNECTION_LIFETIME_CHECK_INTERVAL_SECONDS));
@@ -238,13 +235,13 @@ impl Connection {
                 interval.tick().await;
 
                 let now = Instant::now();
-                let duration = now.duration_since(*last_recv_time.lock().await);
+                let duration = now.duration_since(*last_recv_time.read().await);
                 if duration.as_secs() > ACTIVE_CONNECTION_LIFETIME_SECONDS {
                     break;
                 }
             }
 
-            let _ = connection_event_sender.send(Closed(connection_id, device_id.lock().await.to_string())).await;
+            let _ = connection_event_sender.send(Closed(connection_id, device_id.read().await.to_string())).await;
         }
     }
 
